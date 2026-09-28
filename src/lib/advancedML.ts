@@ -61,7 +61,12 @@ export class PlasticClassifier {
       const output = results[this.session.outputNames[0]];
       const rawScores = output.data as Float32Array;
       
-      const probabilities = this.softmax(Array.from(rawScores));
+      // YOLOv8-cls output is ALREADY probabilities (softmax is baked in)
+      // DO NOT apply softmax again — that was causing all scores to collapse to ~10%
+      const probabilities = Array.from(rawScores);
+
+      // Log raw probabilities for debugging
+      console.log('[ML] Raw model output:', this.CLASS_NAMES.map((n, i) => `${n}:${(probabilities[i]*100).toFixed(1)}%`).join(', '));
 
       const scores: Record<string, number> = {
         PET: probabilities[5] + probabilities[6],
@@ -83,7 +88,11 @@ export class PlasticClassifier {
         }
       }
 
-      if (highestScore < 0.40) {
+      console.log('[ML] Merged scores:', Object.entries(scores).map(([k,v]) => `${k}:${(v*100).toFixed(1)}%`).join(', '));
+      console.log(`[ML] Classification: ${bestType} (${(highestScore*100).toFixed(1)}%)`);
+
+      // Lower threshold since merged classes (PET_A + PET_B) should easily exceed this
+      if (highestScore < 0.15) {
          return {
            type: 'UNKNOWN',
            confidence: highestScore,
