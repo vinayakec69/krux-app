@@ -339,7 +339,8 @@ export const Scanner = () => {
         predicted_class: plasticType,
         confidence: confidence,
         image_hash: 'mock_hash_123', 
-        perceptual_hash: 'mock_phash_123'
+        perceptual_hash: 'mock_phash_123',
+        bin_id: currentBinId || undefined,
       });
 
       setDropTimeout(30);
@@ -597,6 +598,23 @@ export const Scanner = () => {
                   <div>
                     <p className="text-green-600 font-black text-3xl">+{scanResult.coins}</p>
                     <p className="text-gray-500 font-bold text-sm">KRUX EARNED</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Material Classification Card */}
+              <div className="p-4 bg-white border border-gray-200 rounded-2xl shadow-sm mb-4">
+                <p className="text-xs text-gray-400 font-bold uppercase mb-2">ML Classification</p>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-lg font-black" style={{ color: PLASTIC_INFO[scanResult.type]?.color || '#059669' }}>
+                      {PLASTIC_INFO[scanResult.type]?.name || scanResult.type}
+                    </p>
+                    <p className="text-xs text-gray-500 mt-1">{PLASTIC_INFO[scanResult.type]?.examples}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-black text-gray-900">{Math.round(scanResult.confidence * 100)}%</p>
+                    <p className="text-xs text-gray-400">Confidence</p>
                   </div>
                 </div>
               </div>

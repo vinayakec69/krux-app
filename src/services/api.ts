@@ -123,6 +123,8 @@ export function initiateHandshake(user_id: string, bin_id: string) {
 
 // ─────────────────────────────────────────────
 // SCAN VALIDATE — Step 2 & 3
+// Writes the ML classification to Firebase RTDB
+// so the ESP32 knows what material was detected
 // ─────────────────────────────────────────────
 
 export async function validateScan(payload: {
@@ -131,13 +133,31 @@ export async function validateScan(payload: {
   confidence: number;
   image_hash: string;
   perceptual_hash: string;
+  bin_id?: string;
   gps?: { lat: number; lng: number };
 }) {
-  // Bypassing Cloud Functions for TRL-4.
-  // Client-side fraud detection has already passed in Scanner.tsx.
+  const COINS_MAP: Record<string, number> = {
+    PET: 15, HDPE: 12, PP: 11, LDPE: 10, PVC: 8, PS: 7, OTHER: 5
+  };
+  const coins = COINS_MAP[payload.predicted_class] || 10;
+
+  // Write the classification command to RTDB for the ESP32 to read
+  if (payload.bin_id) {
+    const cmdRef = ref(rtdb, `scan_commands/${payload.bin_id}`);
+    await set(cmdRef, {
+      material: payload.predicted_class,
+      confidence: payload.confidence,
+      coins: coins,
+      session_id: payload.session_id,
+      timestamp: Date.now(),
+      status: 'pending_drop'  // ESP32 will change to 'actuating' then 'dropped'
+    });
+    console.log(`[ValidateScan] Wrote classification to /scan_commands/${payload.bin_id}:`, payload.predicted_class);
+  }
+
   return {
     valid: true,
-    krux_earned: payload.predicted_class === 'PET' ? 15 : 10
+    krux_earned: coins
   };
 }
 
@@ -153,9 +173,19 @@ export function listenForDropConfirmation(
 ) {
   const rtdbRef = ref(rtdb, `drop_events/${bin_id}`);
   let timeoutId: ReturnType<typeof setTimeout>;
+  let isFirstRead = true;
+
+  // Clear any stale drop_events BEFORE listening
+  set(rtdbRef, null).then(() => {
+    console.log('[DropListener] Cleared stale drop_events. Waiting for fresh confirmation...');
+  });
 
   const unsubscribe = onValue(rtdbRef, (snap) => {
+    // Skip the first read (which is our own null-clear)
+    if (isFirstRead) { isFirstRead = false; return; }
+
     if (snap.exists() && snap.val()?.status === 'confirmed') {
+      console.log('[DropListener] Drop confirmed by ESP32!', snap.val());
       clearTimeout(timeoutId);
       off(rtdbRef);
       onConfirmed(snap.val());

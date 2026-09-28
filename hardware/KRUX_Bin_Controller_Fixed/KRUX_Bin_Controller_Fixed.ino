@@ -2,103 +2,168 @@
 #include <Firebase_ESP_Client.h>
 #include "addons/TokenHelper.h"
 #include "addons/RTDBHelper.h"
+
 #include <ESP32Servo.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-/* --- FIREBASE & WIFI CREDENTIALS --- */
-#define WIFI_SSID "krish"
-#define WIFI_PASSWORD "okkrishfine"
-#define API_KEY "AIzaSyDUs4meTrtJKgNLy-YvRiufFX5NjymB-SM"
-#define DATABASE_URL "https://krux-ee1df-default-rtdb.firebaseio.com"
-#define BIN_ID "KRUX_BIN_001"
+// ============================================================
+//  CREDENTIALS
+// ============================================================
+#define WIFI_SSID       "krish"
+#define WIFI_PASSWORD   "okkrishfine"
+#define API_KEY         "AIzaSyDUs4meTrtJKgNLy-YvRiufFX5NjymB-SM"
+#define DATABASE_URL    "krux-ee1df-default-rtdb.firebaseio.com" // DO NOT add https:// here!
+#define BIN_ID          "KRUX_BIN_001"
 
+// ============================================================
+//  FIREBASE OBJECTS
+// ============================================================
 FirebaseData fbdo;
 FirebaseAuth auth;
 FirebaseConfig config;
+bool firebaseReady = false;
+unsigned long lastFirebaseCheck = 0;
+bool appConnected = false;
+unsigned long lastPrintTime = 0;
 
-// --- OLED SETUP ---
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+// ============================================================
+//  HARDWARE PINS
+// ============================================================
+#define PIN_SENSOR_ADC  34
+#define PIN_INDUCTIVE   35
+#define PIN_LASER       32
+#define PIN_IR_SENSOR   25
+#define PIN_PAN_SERVO_1 14
+#define PIN_PAN_SERVO_2 27
+#define PIN_TILT_SERVO  26
 
-// --- PIN DEFINITIONS ---
-const int PIN_SENSOR_ADC = 34;
-const int PIN_INDUCTIVE = 25;
-const int PIN_PAN_SERVO_1 = 19;
-const int PIN_PAN_SERVO_2 = 18;
-const int PIN_TILT_SERVO = 23;
-const int PIN_IR_SENSOR = 27;
-const int PIN_LASER = 5;
+// ============================================================
+//  SERVO ANGLES & THRESHOLDS
+// ============================================================
+const int ANGLE_HOME    = 0;
+const int ANGLE_HOME_2  = 0;
+const int TILT_FLAT     = 100;
+const int TILT_DROP     = 30;
+
+const int ANGLE_PET     = 120;
+const int ANGLE_HDPE    = 60;
+const int ANGLE_PP      = 230;
+const int ANGLE_METAL   = 290;
+
+const int THRESH_NO_PAPER = 100;
+const int THRESH_HDPE_MAX = 500;
+const int THRESH_PP_MAX   = 2000;
 
 Servo panServo1;
 Servo panServo2;
 Servo tiltServo;
 
-// --- PAN & TILT ANGLES ---
-const int TILT_FLAT = 90;
-const int TILT_DROP = 150;
-const int ANGLE_HOME = 90;
-const int ANGLE_HOME_2 = 0;
-const int ANGLE_PET = 0;
-const int ANGLE_PP = 90;
-const int ANGLE_HDPE = 180;
-const int ANGLE_METAL = 359;
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET    -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// --- OPTICAL THRESHOLDS ---
-const int THRESH_NO_PAPER = 0;
-const int THRESH_HDPE_MAX = 600;
-const int THRESH_PP_MAX = 1700;
-
-unsigned long lastPrintTime = 0;
-unsigned long lastHandshakeCheck = 0;
-String currentSessionId = "";
-bool binActive = false;
-
-void setup() {
-  Serial.begin(115200);
-
-  pinMode(PIN_LASER, OUTPUT);
-  pinMode(PIN_IR_SENSOR, INPUT);
-  pinMode(PIN_INDUCTIVE, INPUT);
-
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("OLED failed"));
-  }
+// ============================================================
+//  OLED HELPERS
+// ============================================================
+void oledMsg(String line1, String line2, String line3 = "") {
+  display.clearDisplay();
+  display.setTextSize(1);
   display.setTextColor(WHITE);
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(10, 20);
-  display.println("BOOTING...");
+  display.setCursor(0, 0);
+  display.println(line1);
+  display.println(line2);
+  display.println(line3);
   display.display();
+}
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+void oledBig(String top, String bottom) {
   display.clearDisplay();
+  display.setTextColor(WHITE);
   display.setCursor(0, 0);
   display.setTextSize(1);
-  display.println("Connecting WiFi...");
+  display.println(top);
+  display.drawLine(0, 10, 128, 10, WHITE);
+  display.setCursor(0, 20);
+  display.setTextSize(2);
+  display.println(bottom);
   display.display();
+}
 
+void updateOLED(String material, String footprint, int angle) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.println("ECO-SORT PRO V5.0");
+  display.drawLine(0, 10, 128, 10, WHITE);
+
+  if (material == "no paper") {
+    display.setTextSize(2);
+    display.setCursor(0, 30);
+    display.println("No plastic");
+  } else {
+    display.setTextSize(1);
+    display.setCursor(0, 20);
+    display.print("TYPE: ");
+    display.setTextSize(2);
+    display.println(material);
+    display.setTextSize(1);
+    display.setCursor(0, 45);
+    display.print("CO2: ");
+    display.println(footprint);
+    display.setCursor(0, 55);
+    display.print("Ang: ");
+    display.print(angle);
+    display.print(" deg");
+  }
+  display.display();
+}
+
+// ============================================================
+//  SETUP
+// ============================================================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+  }
+  oledMsg("BOOTING...", "Connecting to WiFi");
+
+  pinMode(PIN_SENSOR_ADC, INPUT);
+  pinMode(PIN_INDUCTIVE, INPUT_PULLDOWN);
+  pinMode(PIN_LASER, OUTPUT);
+  pinMode(PIN_IR_SENSOR, INPUT);
+
+  digitalWrite(PIN_LASER, LOW);
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nConnected to WiFi!");
+  Serial.println("\nWiFi connected.");
+  oledMsg("WIFI CONNECTED", "IP:", WiFi.localIP().toString());
 
   config.api_key = API_KEY;
   config.database_url = DATABASE_URL;
+  config.token_status_callback = tokenStatusCallback;
 
+  // Sign up anonymously (Required to prevent 400 Bad Request)
   if (Firebase.signUp(&config, &auth, "", "")) {
-    Serial.println("Firebase Auth Successful");
+    Serial.println(">> Firebase Auth: Anonymous Sign Up OK");
   } else {
-    Serial.printf("Firebase Auth Error: %s\n", config.signer.signupError.message.c_str());
+    Serial.print(">> Firebase Auth ERROR: ");
+    Serial.println(config.signer.signupError.message.c_str());
   }
 
-  config.token_status_callback = tokenStatusCallback;
   Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
 
+  // Initialize Servos
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
@@ -124,10 +189,13 @@ void setup() {
 
   analogSetAttenuation(ADC_11db);
 
-  updateOLED("READY", "--", ANGLE_HOME);
-  Serial.println("System Ready. Waiting for handshake...");
+  Serial.println("========== SETUP COMPLETE ==========");
+  oledMsg("READY - WAITING", "for app to", "connect...");
 }
 
+// ============================================================
+//  SENSOR READING
+// ============================================================
 int getSmoothedReading() {
   digitalWrite(PIN_LASER, HIGH);
   delayMicroseconds(500);
@@ -139,154 +207,102 @@ int getSmoothedReading() {
   return sum / 10;
 }
 
-void updateOLED(String material, String footprint, int angle) {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.println("KRUX BIN V5.0");
-  display.drawLine(0, 10, 128, 10, WHITE);
-
-  if (material == "no paper") {
-    display.setTextSize(2);
-    display.setCursor(0, 30);
-    display.println("No plastic");
-  } else {
-    display.setTextSize(1);
-    display.setCursor(0, 20);
-    display.print("TYPE: ");
-    display.setTextSize(2);
-    display.println(material);
-
-    display.setTextSize(1);
-    display.setCursor(0, 45);
-    display.print("CO2: ");
-    display.println(footprint);
-
-    display.setCursor(0, 55);
-    display.print("Target Ang: ");
-    display.print(angle);
-    display.print(" deg");
-  }
-  display.display();
-}
-
+// ============================================================
+//  NOTIFY APP AFTER DROP
+// ============================================================
 void notifyAppDropCompleted(int coins) {
   if (Firebase.ready()) {
     String path = "/drop_events/" + String(BIN_ID);
-    String jsonStr = "{\"status\":\"confirmed\",\"krux_earned\":" + String(coins) + "}";
-
-    if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), jsonStr.c_str())) {
-      Serial.println("Firebase: App successfully notified!");
+    FirebaseJson json;
+    json.set("status", "confirmed");
+    json.set("krux_earned", coins);
+    if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), &json)) {
+      Serial.println(">> Firebase: Drop event sent to app!");
     } else {
-      Serial.println("Firebase Error: " + fbdo.errorReason());
+      Serial.print(">> Firebase drop event ERROR: ");
+      Serial.println(fbdo.errorReason());
     }
   }
 }
 
-void handleHandshake() {
-  if (!Firebase.ready()) return;
-
-  String path = "/bins/" + String(BIN_ID);
-
-  if (Firebase.RTDB.getJSON(&fbdo, path.c_str())) {
-    String json = fbdo.to<String>();
-
-    if (json.indexOf("\"status\":\"requesting_connection\"") > 0) {
-      int sessionStart = json.indexOf("\"session_id\":\"");
-      if (sessionStart > 0) {
-        sessionStart += 14;
-        int sessionEnd = json.indexOf("\"", sessionStart);
-        currentSessionId = json.substring(sessionStart, sessionEnd);
-      }
-
-      String response = "{\"status\":\"connected\",\"session_id\":\"" + currentSessionId + "\",\"timestamp\":" + String(millis()) + "}";
-      
-      if (Firebase.RTDB.setJSON(&fbdo, path.c_str(), response.c_str())) {
-        Serial.println("[Handshake] Responded with connected: " + currentSessionId);
-        binActive = true;
-        updateOLED("CONNECTED", "Waiting...", ANGLE_HOME);
-      } else {
-        Serial.println("[Handshake] Failed to write response: " + fbdo.errorReason());
-      }
-    }
-    else if (json.indexOf("\"status\":\"connected\"") > 0 && json.indexOf(currentSessionId) > 0) {
-      binActive = true;
-    }
-    else {
-      binActive = false;
-      currentSessionId = "";
-    }
-  }
-}
-
+// ============================================================
+//  MAIN LOOP
+// ============================================================
 void loop() {
-  if (millis() - lastHandshakeCheck > 500) {
-    handleHandshake();
-    lastHandshakeCheck = millis();
-  }
-
-  if (!binActive) {
-    return;
-  }
-
   int sensorValue = getSmoothedReading();
-  int irState = digitalRead(PIN_IR_SENSOR);
+  int irState     = digitalRead(PIN_IR_SENSOR);
   bool metalDetected = (digitalRead(PIN_INDUCTIVE) == HIGH);
 
-  String currentMaterial = "no paper";
+  String currentMaterial  = "no paper";
   String currentFootprint = "--";
-  String isMetalString = "no";
+  String isMetalString    = "no";
   int targetAngle = ANGLE_HOME;
-  int kruxCoins = 0;
+  int kruxCoins   = 0;
 
+  // ---- Classification ----
   if (metalDetected) {
-    currentMaterial = "METAL";
-    currentFootprint = "1.85 kg CO2/kg";
-    isMetalString = "yes";
-    targetAngle = ANGLE_METAL;
-    kruxCoins = 5;
-  }
-  else if (sensorValue <= THRESH_NO_PAPER) {
-    currentMaterial = "no paper";
-    currentFootprint = "--";
-    targetAngle = ANGLE_HOME;
-    kruxCoins = 0;
-  }
-  else if (sensorValue > THRESH_NO_PAPER && sensorValue <= THRESH_HDPE_MAX) {
-    currentMaterial = "HDPE";
-    currentFootprint = "1.19 MTCO2E/Ton";
-    targetAngle = ANGLE_HDPE;
-    kruxCoins = 12;
-  }
-  else if (sensorValue > THRESH_HDPE_MAX && sensorValue <= THRESH_PP_MAX) {
-    currentMaterial = "PP";
-    currentFootprint = "0.84 kg CO2/kg";
-    targetAngle = ANGLE_PP;
-    kruxCoins = 11;
-  }
-  else {
-    currentMaterial = "PET";
-    currentFootprint = "2.15 kg CO2/kg";
-    targetAngle = ANGLE_PET;
-    kruxCoins = 15;
+    currentMaterial = "METAL"; currentFootprint = "1.85 kg CO2/kg";
+    targetAngle = ANGLE_METAL; kruxCoins = 5;
+  } else if (sensorValue <= THRESH_NO_PAPER) {
+    currentMaterial = "no paper"; currentFootprint = "--";
+    targetAngle = ANGLE_HOME; kruxCoins = 0;
+  } else if (sensorValue <= THRESH_HDPE_MAX) {
+    currentMaterial = "HDPE"; currentFootprint = "1.19 MTCO2E/Ton";
+    targetAngle = ANGLE_HDPE; kruxCoins = 12;
+  } else if (sensorValue <= THRESH_PP_MAX) {
+    currentMaterial = "PP"; currentFootprint = "0.84 kg CO2/kg";
+    targetAngle = ANGLE_PP; kruxCoins = 11;
+  } else {
+    currentMaterial = "PET"; currentFootprint = "2.15 kg CO2/kg";
+    targetAngle = ANGLE_PET; kruxCoins = 15;
   }
 
-  if (millis() - lastPrintTime > 400) {
-    Serial.print("Current adcvalue:\"");
-    Serial.print(sensorValue);
-    Serial.print("\", plastic type :\"");
-    Serial.print(currentMaterial);
-    Serial.print("\", angle of rotation:\"");
-    Serial.print(targetAngle);
-    Serial.print("\", metal :\"");
-    Serial.print(isMetalString);
-    Serial.print("\", CO2 foot print:\"");
-    Serial.print(currentFootprint);
-    Serial.println("\",");
-    updateOLED(currentMaterial, currentFootprint, targetAngle);
+  // ---- Periodic Screen Update ----
+  if (millis() - lastPrintTime > 2000) {
+    if (!appConnected) {
+      updateOLED("WAITING", "for app..", 0);
+    } else {
+      updateOLED(currentMaterial, currentFootprint, targetAngle);
+    }
     lastPrintTime = millis();
   }
 
+  // ============================================================
+  //  FIREBASE HANDSHAKE - Check every 3 seconds
+  // ============================================================
+  if (millis() > 5000 && millis() - lastFirebaseCheck > 3000) {
+    lastFirebaseCheck = millis();
+
+    if (Firebase.ready()) {
+      if (!firebaseReady) {
+        firebaseReady = true;
+        Serial.println(">> Firebase is READY. Polling for app connection...");
+      }
+
+      String statusPath = "/bins/" + String(BIN_ID) + "/status";
+
+      if (Firebase.RTDB.getString(&fbdo, statusPath.c_str())) {
+        String status = fbdo.stringData();
+        
+        // APP IS REQUESTING CONNECTION
+        if (status == "requesting_connection") {
+          Serial.println("\n>>> APP CONNECTED TO BIN SUCCESSFULLY! <<<\n");
+          oledBig("APP", "CONNECTED!");
+
+          // Reply back so the app unlocks its camera
+          if (Firebase.RTDB.setString(&fbdo, statusPath.c_str(), "connected")) {
+            Serial.println(">> Replied 'connected' to app. Handshake complete!");
+          }
+          appConnected = true;
+          delay(2000); 
+        }
+      }
+    }
+  }
+
+  // ============================================================
+  //  ACTUATION - Only when IR triggers and material detected
+  // ============================================================
   if (irState == LOW && currentMaterial != "no paper") {
     if (targetAngle <= 180) {
       panServo1.attach(PIN_PAN_SERVO_1, 500, 2400);
@@ -326,12 +342,6 @@ void loop() {
     }
 
     notifyAppDropCompleted(kruxCoins);
-    binActive = false;
-    currentSessionId = "";
-
-    String resetPath = "/bins/" + String(BIN_ID);
-    Firebase.RTDB.setJSON(&fbdo, resetPath.c_str(), "{\"status\":\"idle\"}");
-
     delay(1500);
   }
 }
